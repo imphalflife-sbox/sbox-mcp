@@ -1,6 +1,4 @@
 using System.Collections.Concurrent;
-using System.Diagnostics;
-using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -9,14 +7,25 @@ using Microsoft.Extensions.Logging;
 
 namespace SboxMcp.Server.Bridge;
 
+/// <summary>
+/// Bridge transport for the MCP server. The .NET MCP server is the WebSocket client;
+/// the bridge addon inside the s&box editor is the server that accepts many clients.
+/// This inversion lets multiple Claude Code sessions (each with its own MCP server
+/// subprocess) drive one editor concurrently — there is no shared :29015 port to fight over.
+/// Class name retained for DI/back-compat; behavior is now client-side.
+/// </summary>
 public sealed class EditorBridgeServer : BackgroundService
 {
     private readonly ILogger<EditorBridgeServer> _logger;
     private readonly int _port;
-    private WebSocket? _client;
+    private ClientWebSocket? _ws;
     private readonly ConcurrentDictionary<string, TaskCompletionSource<BridgeResponse>> _pending = new();
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
 
-    public bool IsConnected => _client is { State: WebSocketState.Open };
+    private static readonly TimeSpan ReconnectDelay = TimeSpan.FromSeconds(3);
+    private static readonly TimeSpan SendCommandTimeout = TimeSpan.FromSeconds(30);
+
+    public bool IsConnected => _ws is { State: WebSocketState.Open };
     public int Port => _port;
 
     public EditorBridgeServer(ILogger<EditorBridgeServer> logger)
@@ -27,59 +36,54 @@ public sealed class EditorBridgeServer : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var listener = new HttpListener();
-        listener.Prefixes.Add($"http://localhost:{_port}/");
-
-        try
-        {
-            listener.Start();
-        }
-        catch (HttpListenerException)
-        {
-            _logger.LogWarning("Port {Port} already in use — killing stale SboxMcp.Server process", _port);
-            KillExistingServer();
-            listener.Start();
-        }
-
-        _logger.LogInformation("WebSocket server listening on http://localhost:{Port}/", _port);
+        var loggedDownOnce = false;
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            HttpListenerContext ctx;
             try
             {
-                ctx = await listener.GetContextAsync().WaitAsync(stoppingToken);
+                await ConnectAndPumpAsync(stoppingToken);
+                loggedDownOnce = false;
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {
                 break;
             }
-
-            if (!ctx.Request.IsWebSocketRequest)
+            catch (Exception ex)
             {
-                ctx.Response.StatusCode = 400;
-                ctx.Response.Close();
-                continue;
+                // Quiet during normal "editor not open yet" polling — log first failure only,
+                // then stay silent until we reconnect.
+                if (!loggedDownOnce)
+                {
+                    _logger.LogInformation("s&box bridge unreachable ({Reason}); will retry every {Delay}s",
+                        ex.Message, ReconnectDelay.TotalSeconds);
+                    loggedDownOnce = true;
+                }
+            }
+            finally
+            {
+                FailPending("Bridge disconnected.");
+                _ws?.Dispose();
+                _ws = null;
             }
 
-            var wsCtx = await ctx.AcceptWebSocketAsync(null);
-            _client = wsCtx.WebSocket;
-            _logger.LogInformation("s&box bridge connected from {RemoteEndPoint}", ctx.Request.RemoteEndPoint);
-
-            await ReceiveLoopAsync(_client, stoppingToken);
-
-            _logger.LogInformation("s&box bridge disconnected");
-            _client = null;
-
-            // Fail all pending requests
-            foreach (var (key, tcs) in _pending)
-            {
-                if (_pending.TryRemove(key, out _))
-                    tcs.TrySetException(new InvalidOperationException("Bridge disconnected."));
-            }
+            try { await Task.Delay(ReconnectDelay, stoppingToken); }
+            catch (OperationCanceledException) { break; }
         }
+    }
 
-        listener.Stop();
+    private async Task ConnectAndPumpAsync(CancellationToken ct)
+    {
+        _ws?.Dispose();
+        _ws = new ClientWebSocket();
+
+        var uri = new Uri($"ws://localhost:{_port}/");
+        await _ws.ConnectAsync(uri, ct);
+        _logger.LogInformation("Connected to s&box bridge at {Uri}", uri);
+
+        await ReceiveLoopAsync(_ws, ct);
+
+        _logger.LogInformation("s&box bridge connection closed");
     }
 
     private async Task ReceiveLoopAsync(WebSocket ws, CancellationToken ct)
@@ -137,30 +141,21 @@ public sealed class EditorBridgeServer : BackgroundService
         }
     }
 
-    private void KillExistingServer()
+    private void FailPending(string reason)
     {
-        var current = Environment.ProcessId;
-        foreach (var proc in Process.GetProcessesByName("SboxMcp.Server"))
+        foreach (var (key, tcs) in _pending)
         {
-            if (proc.Id == current) continue;
-            try
-            {
-                _logger.LogInformation("Killing stale SboxMcp.Server (PID {Pid})", proc.Id);
-                proc.Kill();
-                proc.WaitForExit(3000);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to kill PID {Pid}", proc.Id);
-            }
+            if (_pending.TryRemove(key, out _))
+                tcs.TrySetException(new InvalidOperationException(reason));
         }
     }
 
     public async Task<BridgeResponse> SendCommandAsync(string command, object? @params, CancellationToken ct)
     {
-        if (_client is not { State: WebSocketState.Open })
+        var ws = _ws;
+        if (ws is not { State: WebSocketState.Open })
             throw new InvalidOperationException(
-                "No s&box editor bridge is connected. Please start the SboxMcp bridge addon inside the s&box editor.");
+                "No s&box editor bridge is connected. Open s&box and ensure the MCP Bridge dock is loaded.");
 
         var id = Guid.NewGuid().ToString();
         var request = new BridgeRequest { Id = id, Command = command, Params = @params };
@@ -171,7 +166,16 @@ public sealed class EditorBridgeServer : BackgroundService
 
         try
         {
-            await _client.SendAsync(json, WebSocketMessageType.Text, endOfMessage: true, ct);
+            // ClientWebSocket.SendAsync is not safe for concurrent senders; serialize.
+            await _sendLock.WaitAsync(ct);
+            try
+            {
+                await ws.SendAsync(json, WebSocketMessageType.Text, endOfMessage: true, ct);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
         }
         catch
         {
@@ -180,7 +184,7 @@ public sealed class EditorBridgeServer : BackgroundService
         }
 
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        cts.CancelAfter(TimeSpan.FromSeconds(30));
+        cts.CancelAfter(SendCommandTimeout);
 
         try
         {

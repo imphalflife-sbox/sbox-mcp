@@ -2,7 +2,8 @@ namespace SboxMcp.Bridge;
 
 /// <summary>
 /// s&box Editor Dock entry point for the MCP Bridge.
-/// Appears in the editor as a dockable panel and manages the WebSocket client lifecycle.
+/// Hosts the WebSocket server that accepts MCP-server clients (one per connected
+/// Claude Code session) and surfaces connection state.
 /// </summary>
 [Dock( "Editor", "MCP Bridge", "smart_toy" )]
 public class McpBridgeDock : Widget
@@ -11,17 +12,18 @@ public class McpBridgeDock : Widget
 
 	public int CommandCount { get; set; }
 
-	private McpBridgeClient _client;
-	private int _port = 29015;
+	private McpBridgeServer _server;
+	private int _port = McpBridgeServer.DefaultPort;
 	private readonly List<string> _logEntries = new();
 	private const int MaxLogEntries = 50;
-	private DateTime _connectedAt;
+	private DateTime _startedAt;
 
 	private Editor.Label _statusDot;
 	private Editor.Label _statusText;
 	private Editor.Label _urlLabel;
-	private Button _connectButton;
+	private Button _toggleButton;
 	private Editor.Label _commandCountLabel;
+	private Editor.Label _clientCountLabel;
 	private Editor.Label _uptimeLabel;
 	private Layout _logLayout;
 	private LineEdit _portField;
@@ -42,7 +44,7 @@ public class McpBridgeDock : Widget
 		BuildStats();
 		BuildLog();
 
-		StartClient();
+		StartServer();
 	}
 
 	private void BuildHeader()
@@ -57,7 +59,7 @@ public class McpBridgeDock : Widget
 		var textCol = header.AddColumn();
 		textCol.Spacing = 2;
 
-		_statusText = new Editor.Label( "Disconnected", this );
+		_statusText = new Editor.Label( "Stopped", this );
 		textCol.Add( _statusText );
 
 		_urlLabel = new Editor.Label( $"ws://localhost:{_port}", this );
@@ -92,22 +94,29 @@ public class McpBridgeDock : Widget
 
 		row.AddStretchCell();
 
-		_connectButton = new Button( "Connect", this );
-		_connectButton.Icon = "link";
-		_connectButton.Clicked = () =>
+		_toggleButton = new Button( "Stop", this );
+		_toggleButton.Icon = "stop";
+		_toggleButton.Clicked = () =>
 		{
-			if ( _client != null && _client.IsConnected )
-				StopClient();
+			if ( _server != null && _server.IsListening )
+				StopServer();
 			else
-				StartClient();
+				StartServer();
 		};
-		row.Add( _connectButton );
+		row.Add( _toggleButton );
 	}
 
 	private void BuildStats()
 	{
 		var statsRow = Layout.AddRow();
 		statsRow.Spacing = 12;
+
+		var clientsCol = statsRow.AddColumn();
+		clientsCol.Spacing = 2;
+		clientsCol.Add( new Editor.Label( "Clients", this ) );
+		_clientCountLabel = new Editor.Label( "0", this );
+		_clientCountLabel.SetStyles( "font-size: 18px; font-weight: bold;" );
+		clientsCol.Add( _clientCountLabel );
 
 		var cmdCol = statsRow.AddColumn();
 		cmdCol.Spacing = 2;
@@ -143,28 +152,42 @@ public class McpBridgeDock : Widget
 	{
 		if ( Current == this )
 			Current = null;
-		StopClient();
+		StopServer();
 		base.OnDestroyed();
 	}
 
 	[EditorEvent.Frame]
 	public void Frame()
 	{
-		if ( !_statusDot.IsValid() || !_statusText.IsValid() || !_connectButton.IsValid() )
+		if ( !_statusDot.IsValid() || !_statusText.IsValid() || !_toggleButton.IsValid() )
 			return;
 
-		var connected = _client != null && _client.IsConnected;
+		var listening = _server != null && _server.IsListening;
+		var clientCount = listening ? _server.ClientCount : 0;
 
-		_statusDot.SetStyles( connected ? "color: #52e052; font-size: 18px;" : "color: #e05252; font-size: 18px;" );
-		_statusText.Text = connected ? "Connected" : "Disconnected";
-		_connectButton.Text = connected ? "Disconnect" : "Connect";
-		_connectButton.Icon = connected ? "link_off" : "link";
+		// Green dot if a client is connected, amber if listening but idle, red if stopped.
+		var dotColor = !listening ? "#e05252"
+			: clientCount > 0 ? "#52e052"
+			: "#e0a052";
+		_statusDot.SetStyles( $"color: {dotColor}; font-size: 18px;" );
+
+		_statusText.Text = !listening
+			? "Stopped"
+			: clientCount == 0
+				? "Listening (no clients)"
+				: clientCount == 1
+					? "Listening (1 client)"
+					: $"Listening ({clientCount} clients)";
+
+		_toggleButton.Text = listening ? "Stop" : "Start";
+		_toggleButton.Icon = listening ? "stop" : "play_arrow";
+		_clientCountLabel.Text = clientCount.ToString();
 		_commandCountLabel.Text = CommandCount.ToString();
-		_portField.ReadOnly = connected;
+		_portField.ReadOnly = listening;
 
-		if ( connected && _connectedAt != default )
+		if ( listening && _startedAt != default )
 		{
-			var elapsed = DateTime.Now - _connectedAt;
+			var elapsed = DateTime.Now - _startedAt;
 			_uptimeLabel.Text = elapsed.TotalHours >= 1
 				? $"{(int)elapsed.TotalHours}h {elapsed.Minutes:D2}m"
 				: $"{elapsed.Minutes}m {elapsed.Seconds:D2}s";
@@ -191,25 +214,24 @@ public class McpBridgeDock : Widget
 		}
 	}
 
-	private void StartClient()
+	private void StartServer()
 	{
-		StopClient();
-		var url = $"ws://localhost:{_port}";
-		_client = new McpBridgeClient( url );
-		_client.Connect();
-		_connectedAt = DateTime.Now;
-		Log.Info( $"[MCP Bridge] Client started, connecting to {url}" );
-		AddLog( $"Connecting to {url}..." );
+		StopServer();
+		_server = new McpBridgeServer( _port );
+		_server.Start();
+		_startedAt = DateTime.Now;
+		Log.Info( $"[MCP Bridge] Server started on ws://localhost:{_port}" );
+		AddLog( $"Listening on ws://localhost:{_port}" );
 	}
 
-	private void StopClient()
+	private void StopServer()
 	{
-		if ( _client is null )
+		if ( _server is null )
 			return;
-		_client.Disconnect();
-		_client.Dispose();
-		_client = null;
-		_connectedAt = default;
-		AddLog( "Disconnected." );
+		_server.Stop();
+		_server.Dispose();
+		_server = null;
+		_startedAt = default;
+		AddLog( "Stopped." );
 	}
 }
