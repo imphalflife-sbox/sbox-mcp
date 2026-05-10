@@ -121,12 +121,34 @@ public static class EditorTools
     }
 
     [McpServerTool(Name = "editor_console_output")]
-    [Description("Get recent console output from the s&box editor")]
-    public static async Task<string> ConsoleOutput(EditorBridgeServer bridge, CancellationToken ct)
+    [Description("Get the most recent console log entries from the s&box editor. " +
+        "Backed by an in-editor ring buffer (capacity 5000) populated from EditorUtility.AddLogger — " +
+        "returns engine + game-code Log.Info/Warning/Error output, oldest-first within the slice. " +
+        "Each entry has Seq, Timestamp, Level, Logger, Message, Exception. " +
+        "Response also includes a `bridge` block with editor uptime, last compile age, and ring buffer fill.")]
+    public static async Task<string> ConsoleOutput(
+        EditorBridgeServer bridge,
+        [Description("How many most-recent entries to return (1..5000). Default 50.")] int tail,
+        CancellationToken ct)
     {
-        var response = await bridge.SendCommandAsync("editor.console_output", null, ct);
+        var clamped = tail <= 0 ? 50 : Math.Min(tail, 5000);
+        var response = await bridge.SendCommandAsync("diagnostics.get_logs", new { tail = clamped }, ct);
         return response.Success
             ? response.Data?.ToString() ?? "(no output)"
+            : $"Error: {response.Error}";
+    }
+
+    [McpServerTool(Name = "editor_compile_diagnostics")]
+    [Description("Get the snapshot from the most recent compile that finished after editor startup. " +
+        "Returns { available, snapshot?, note?, bridge }. When `available` is false, no compile has " +
+        "completed since editor start. The `snapshot` contains CompletedAt, Success, ErrorCount, " +
+        "WarningCount, and a Diagnostics array of { Severity, Id, Message, FilePath, Line, Column }. " +
+        "Severity includes Hidden (CS8019 unused-using etc.) — filter client-side as needed.")]
+    public static async Task<string> CompileDiagnostics(EditorBridgeServer bridge, CancellationToken ct)
+    {
+        var response = await bridge.SendCommandAsync("diagnostics.get_compile", null, ct);
+        return response.Success
+            ? response.Data?.ToString() ?? "(no diagnostics)"
             : $"Error: {response.Error}";
     }
 }

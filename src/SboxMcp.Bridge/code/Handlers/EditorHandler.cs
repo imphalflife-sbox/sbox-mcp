@@ -226,14 +226,8 @@ public static class EditorHandler
 		} );
 	}
 
-	/// <summary>
-	/// editor.console_output — Return recent log entries captured by the bridge.
-	/// </summary>
-	public static Task<object> HandleConsoleOutput( BridgeRequest request )
-	{
-		var lines = ConsoleCapture.GetRecent();
-		return Task.FromResult<object>( (object)new { lines = lines } );
-	}
+	// editor.console_output now routes through DiagnosticsHandler.HandleGetLogs —
+	// see CommandRouter.cs. The old manual ConsoleCapture path was deleted.
 
 	// -------------------------------------------------------------------------
 	// Hierarchy helpers (used by SceneHandler.HandleHierarchy)

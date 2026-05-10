@@ -1,3 +1,5 @@
+using SboxMcp.Bridge.Diagnostics;
+
 namespace SboxMcp.Bridge;
 
 /// <summary>
@@ -25,14 +27,18 @@ public class McpBridgeDock : Widget
 	private Editor.Label _commandCountLabel;
 	private Editor.Label _clientCountLabel;
 	private Editor.Label _uptimeLabel;
+	private Editor.Label _editorUptimeLabel;
+	private Editor.Label _lastCompileLabel;
+	private Editor.Label _logBufferLabel;
+	private Editor.Label _compileCountLabel;
+	private Editor.Label _hotloadCountLabel;
+	private Editor.Label _loggerSubsLabel;
 	private Layout _logLayout;
 	private LineEdit _portField;
 
 	public McpBridgeDock( Widget parent ) : base( parent )
 	{
 		Current = this;
-
-		ConsoleCapture.EnsureHooked();
 
 		MinimumSize = 200;
 		Layout = Layout.Column();
@@ -42,6 +48,7 @@ public class McpBridgeDock : Widget
 		BuildHeader();
 		BuildControls();
 		BuildStats();
+		BuildDiagnostics();
 		BuildLog();
 
 		StartServer();
@@ -135,6 +142,48 @@ public class McpBridgeDock : Widget
 		statsRow.AddStretchCell();
 	}
 
+	// Diagnostics section reads from DiagnosticsBridge — the in-editor compile.complete
+	// listener and EditorUtility.AddLogger ring buffer that backs the diagnostics MCP tools.
+	// Lets the operator see at a glance whether [Event] dispatch is healthy across hotloads
+	// without having to call diagnostics.get_logs.
+	private void BuildDiagnostics()
+	{
+		var sep = new Editor.Label( "Diagnostics", this );
+		sep.SetStyles( "color: #888888; font-size: 11px; text-transform: uppercase; letter-spacing: 1px;" );
+		Layout.Add( sep );
+
+		var grid = Layout.AddRow();
+		grid.Spacing = 12;
+
+		var leftCol = grid.AddColumn();
+		leftCol.Spacing = 4;
+		_editorUptimeLabel = AddLabeledRow( leftCol, "Editor up", "--" );
+		_lastCompileLabel  = AddLabeledRow( leftCol, "Last compile", "--" );
+		_logBufferLabel    = AddLabeledRow( leftCol, "Log buffer", "0 / 0" );
+
+		var rightCol = grid.AddColumn();
+		rightCol.Spacing = 4;
+		_compileCountLabel = AddLabeledRow( rightCol, "Compiles", "0" );
+		_hotloadCountLabel = AddLabeledRow( rightCol, "Hotloads", "0" );
+		_loggerSubsLabel   = AddLabeledRow( rightCol, "Logger subs", "0" );
+
+		grid.AddStretchCell();
+	}
+
+	private Editor.Label AddLabeledRow( Layout col, string label, string initial )
+	{
+		var row = col.AddRow();
+		row.Spacing = 6;
+		var lblLabel = new Editor.Label( label, this );
+		lblLabel.SetStyles( "color: #888888; font-size: 11px;" );
+		row.Add( lblLabel );
+		var valueLabel = new Editor.Label( initial, this );
+		valueLabel.SetStyles( "font-size: 11px;" );
+		row.Add( valueLabel );
+		row.AddStretchCell();
+		return valueLabel;
+	}
+
 	private void BuildLog()
 	{
 		Layout.Add( new Editor.Label( "Activity Log", this ) );
@@ -196,6 +245,46 @@ public class McpBridgeDock : Widget
 		{
 			_uptimeLabel.Text = "--";
 		}
+
+		UpdateDiagnostics();
+	}
+
+	private void UpdateDiagnostics()
+	{
+		if ( !_editorUptimeLabel.IsValid() ) return;
+
+		var startedAt = DiagnosticsBridge.EditorStartedAt;
+		_editorUptimeLabel.Text = startedAt.HasValue
+			? FormatDuration( DateTime.UtcNow - startedAt.Value )
+			: "--";
+
+		var compiledAt = DiagnosticsBridge.LastCompileAt;
+		var snap = DiagnosticsBridge.LastCompile;
+		if ( compiledAt.HasValue && snap != null )
+		{
+			var age = FormatDuration( DateTime.UtcNow - compiledAt.Value );
+			_lastCompileLabel.Text = snap.Success
+				? $"{age} ago  ✓"
+				: $"{age} ago  ✗ {snap.ErrorCount}e";
+		}
+		else
+		{
+			_lastCompileLabel.Text = "(none yet)";
+		}
+
+		var ring = DiagnosticsBridge.Logs;
+		_logBufferLabel.Text = ring != null ? $"{ring.Count} / {ring.Capacity}" : "--";
+		_compileCountLabel.Text = DiagnosticsBridge.CompileCompleteCount.ToString();
+		_hotloadCountLabel.Text = DiagnosticsBridge.HotloadStaticCount.ToString();
+		_loggerSubsLabel.Text = DiagnosticsBridge.LoggerSubscriberCount.ToString();
+	}
+
+	private static string FormatDuration( TimeSpan d )
+	{
+		if ( d.TotalSeconds < 60 ) return $"{(int)d.TotalSeconds}s";
+		if ( d.TotalMinutes < 60 ) return $"{(int)d.TotalMinutes}m";
+		if ( d.TotalHours < 24 ) return $"{(int)d.TotalHours}h {d.Minutes:D2}m";
+		return $"{(int)d.TotalDays}d {d.Hours:D2}h";
 	}
 
 	public void AddLog( string message )

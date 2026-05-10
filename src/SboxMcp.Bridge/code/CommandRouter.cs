@@ -58,7 +58,14 @@ public static class CommandRouter
 		["editor.stop"]          = r => EditorHandler.HandleStop( r ),
 		["editor.is_playing"]    = r => EditorHandler.HandleIsPlaying( r ),
 		["editor.scene_info"]    = r => EditorHandler.HandleSceneInfo( r ),
-		["editor.console_output"] = r => EditorHandler.HandleConsoleOutput( r ),
+
+		// Diagnostics commands — backed by DiagnosticsBridge (compile.complete +
+		// EditorUtility.AddLogger subscriptions inside the editor).
+		// editor.console_output is an alias for diagnostics.get_logs so the existing
+		// MCP server tool name stays valid; both routes hit the same ring buffer.
+		["editor.console_output"]   = r => DiagnosticsHandler.HandleGetLogs( r ),
+		["diagnostics.get_logs"]    = r => DiagnosticsHandler.HandleGetLogs( r ),
+		["diagnostics.get_compile"] = r => DiagnosticsHandler.HandleGetCompile( r ),
 
 		// Asset commands
 		["asset.search"]       = r => AssetHandler.SearchAssets( r ),
