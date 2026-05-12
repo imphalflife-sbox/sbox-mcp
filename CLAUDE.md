@@ -6,8 +6,14 @@ MCP server for the s&box game engine editor.
 
 Two-component system:
 
-- **SboxMcp.Server** (`src/SboxMcp.Server/`) — .NET 9 MCP server. Speaks stdio to AI clients, hosts a WebSocket server on port 29015 for the editor bridge. Build with `dotnet build`.
-- **SboxMcp.Bridge** (`src/SboxMcp.Bridge/`) — s&box editor addon (C# source compiled by s&box's Roslyn pipeline). NOT a .NET project — do not try to `dotnet build` it. Install by copying files into `addons/tools/Code/McpBridge/` inside the s&box install directory.
+- **SboxMcp.Server** (`src/SboxMcp.Server/`) — .NET 9 MCP server. Speaks stdio to AI clients, hosts a WebSocket server on port 29015 for the editor bridge. Build with `dotnet build`. Nullable reference types are **enabled** here.
+- **SboxMcp.Bridge** (`src/SboxMcp.Bridge/`) — s&box editor addon (C# source compiled by s&box's Roslyn pipeline). NOT a .NET project — do not try to `dotnet build` it. Install by copying files into `addons/tools/Code/McpBridge/` inside the s&box install directory. Nullable reference types are **disabled** here.
+
+The two trees mirror each other 1:1 by area: `Server/Tools/{Area}Tools.cs` (MCP-facing) pairs with `Bridge/code/Handlers/{Area}Handler.cs` (scene-facing). Keep both in sync when adding/changing per-area functionality.
+
+### stdio transport — never write to stdout
+
+The server uses `WithStdioServerTransport()`. **Anything written to stdout from server code corrupts the MCP protocol.** Never use `Console.WriteLine` / `Console.Write` in `SboxMcp.Server`. Use `ILogger` (routes to stderr via the default .NET host) for all diagnostics.
 
 ## Communication Protocol
 
@@ -33,7 +39,7 @@ The MCP server tool parameters use camelCase names (e.g. `objectId`, `componentT
 
 - The bridge compiles as part of `local.toolbase` — files go in `addons/tools/Code/McpBridge/`
 - Global imports (`Editor`, `Sandbox`, `System`, etc.) are provided by `Imports.cs` — do not add using statements for these
-- Do not use nullable reference annotations (`string?`) — s&box compiles without `#nullable enable`
+- Do not use nullable reference annotations (`string?`) in bridge code — s&box compiles it without `#nullable enable` (server code is opposite — annotations required)
 - `MathF` does not exist — use `float.Sin()`, `float.Pi`, etc. for math operations in game project code
 - `Log.OnEntry` does not exist — there is no event-based log capture API
 
@@ -90,15 +96,28 @@ Check `targetType.Name` (not `typeof()` comparison) since types from `TypeLibrar
 ## Build & Test
 
 ```bash
-# Build the MCP server
+# Build the MCP server (solution-level — the bridge is not a .NET project, so the .sln only contains the server)
+dotnet build sbox-mcp.sln -c Release
+# or just the server project
 dotnet build src/SboxMcp.Server -c Release
 
 # Run the MCP server (for testing — normally launched by Claude Code)
 dotnet run --project src/SboxMcp.Server
+```
 
-# Sync bridge files to s&box (adjust path to your s&box install)
+**Sync bridge files to s&box** (adjust path to your s&box install):
+
+```bash
+# Git Bash / WSL
 cp -r src/SboxMcp.Bridge/code/* "/c/Program Files (x86)/Steam/steamapps/common/sbox/addons/tools/Code/McpBridge/"
 ```
+
+```powershell
+# PowerShell
+Copy-Item -Recurse -Force src\SboxMcp.Bridge\code\* "C:\Program Files (x86)\Steam\steamapps\common\sbox\addons\tools\Code\McpBridge\"
+```
+
+**No automated test suite exists.** There is no `dotnet test` target. Verify changes by running the server, connecting the bridge in s&box, and exercising the affected tool from an MCP client.
 
 ## Documentation
 

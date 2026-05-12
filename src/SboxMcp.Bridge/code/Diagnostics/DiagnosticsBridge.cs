@@ -163,11 +163,22 @@ internal class BridgeInstance
 	{
 		try
 		{
+			// Drop our own bridge chatter — every MCP command emits a
+			// "[MCP Bridge] {endpoint} → {command}" line plus per-handler ack lines.
+			// At sustained tool-call rates these saturate the 5000-slot ring within
+			// a session and push out the engine/game logs the caller actually wants.
+			// The s&box console and the dock activity log still show them; the ring
+			// just stops mirroring information the caller already has from the
+			// response payload.
+			var msg = e.Message;
+			if ( msg != null && msg.StartsWith( "[MCP Bridge", StringComparison.Ordinal ) )
+				return;
+
 			Logs?.Append(
 				time: e.Time,
 				level: e.Level.ToString(),
 				logger: e.Logger ?? "",
-				message: e.Message ?? "",
+				message: msg ?? "",
 				exception: e.Exception?.ToString() );
 		}
 		catch
