@@ -81,6 +81,12 @@ public static class CommandRouter
 	[ConVar( "sbox_mcp_main_thread_timeout_ms" )]
 	public static int MainThreadTimeoutMs { get; set; } = 15_000;
 
+	/// <summary>UTC timestamp of the last successfully-completed command. null if no command has completed yet (or since hotload reset it).</summary>
+	public static DateTime? LastCommandCompletedAt { get; private set; }
+
+	/// <summary>The command name currently dispatching, if any. Null when idle.</summary>
+	public static string CurrentCommand { get; private set; }
+
 	/// <summary>
 	/// Routes a request to its handler. Returns an error response for unknown commands.
 	/// Handlers are called directly — the editor main thread dispatches incoming messages.
@@ -99,6 +105,7 @@ public static class CommandRouter
 
 			// Show toast and log
 			McpCommandToast.Show( request.Command );
+			CurrentCommand = request.Command;
 			McpBridgeDock.Current?.AddLog( $"→ {request.Command}" );
 
 			// Dispatch to main thread — s&box editor APIs must run on the main thread.
@@ -124,12 +131,15 @@ public static class CommandRouter
 			{
 				McpCommandToast.Complete( request.Command, false );
 				McpBridgeDock.Current?.AddLog( $"⏱ {request.Command}: main thread did not dispatch within {MainThreadTimeoutMs}ms" );
+				CurrentCommand = null;
 				return BridgeResponse.Fail( request.Id,
 					$"Main thread did not dispatch '{request.Command}' within {MainThreadTimeoutMs}ms. " +
 					$"The editor is likely processing a hotload cascade — wait a few seconds and retry." );
 			}
 
 			// Update toast and dock on success
+			LastCommandCompletedAt = DateTime.UtcNow;
+			CurrentCommand = null;
 			McpCommandToast.Complete( request.Command, true );
 			if ( McpBridgeDock.Current != null )
 			{
@@ -141,6 +151,7 @@ public static class CommandRouter
 		}
 		catch ( Exception ex )
 		{
+			CurrentCommand = null;
 			Log.Error( $"[MCP Bridge] Handler error for '{request.Command}': {ex.Message}" );
 
 			// Update toast and dock on failure
