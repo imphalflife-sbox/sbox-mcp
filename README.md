@@ -27,6 +27,10 @@ flowchart LR
 
 The MCP Server exposes tools over **stdio** (consumed by AI clients like Claude Desktop or Claude Code). It forwards commands over a **WebSocket** connection to the Bridge Addon running inside the s&box editor, which executes them against the live scene and returns results.
 
+### Hotload resilience
+
+The bridge subscribes to the editor's `hotloaded` event and tears down + reconnects after every hotload. Bridge command dispatch uses a switch expression (not a static delegate dictionary) so the routing table can't get stranded across assembly versions. Each dispatch is time-bounded by the `sbox_mcp_main_thread_timeout_ms` ConVar (default 15s) — if the editor's main thread is wedged, commands fail with a structured error rather than hanging. `get_bridge_status` probes `bridge.health` (which bypasses the main thread) to report whether the bridge is actually responsive, not just connected.
+
 ---
 
 ## Features
