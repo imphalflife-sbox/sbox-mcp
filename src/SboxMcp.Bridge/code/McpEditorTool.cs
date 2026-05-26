@@ -249,6 +249,25 @@ public class McpBridgeDock : Widget
 		UpdateDiagnostics();
 	}
 
+	/// <summary>
+	/// Fires after every editor hotload. We tear down the (possibly stale) server
+	/// and reconnect. The Sandbox.Hotload upgrader migrates this Widget instance's
+	/// type, but in-flight async Tasks captured by McpBridgeServer may not survive
+	/// the substitution — recreating the server guarantees a fresh state machine.
+	/// </summary>
+	[Event( "hotloaded" )]
+	public void OnHotloaded()
+	{
+		if ( !this.IsValid() )
+			return;
+
+		AddLog( "Hotload detected — restarting server." );
+		Log.Info( "[MCP Bridge] Hotload detected — restarting server." );
+
+		StopServer();
+		StartServer();
+	}
+
 	private void UpdateDiagnostics()
 	{
 		if ( !_editorUptimeLabel.IsValid() ) return;
