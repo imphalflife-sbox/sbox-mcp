@@ -9,75 +9,6 @@ namespace SboxMcp.Bridge;
 /// </summary>
 public static class CommandRouter
 {
-	private delegate Task<object> HandlerFunc( BridgeRequest request );
-
-	private static readonly Dictionary<string, HandlerFunc> Handlers = new()
-	{
-		// Scene commands
-		["scene.list"]             = r => SceneHandler.ListObjects( r ),
-		["scene.get"]              = r => SceneHandler.GetObject( r ),
-		["scene.create"]           = r => SceneHandler.CreateObject( r ),
-		["scene.delete"]           = r => SceneHandler.DeleteObject( r ),
-		["scene.find"]             = r => SceneHandler.FindObjects( r ),
-		["scene.set_transform"]    = r => SceneHandler.SetTransform( r ),
-		["scene.hierarchy"]        = r => SceneHandler.GetHierarchy( r ),
-		["scene.clone"]            = r => SceneHandler.CloneObject( r ),
-		["scene.reparent"]         = r => SceneHandler.ReparentObject( r ),
-		["scene.find_by_component"] = r => SceneHandler.FindByComponent( r ),
-		["scene.find_by_tag"]      = r => SceneHandler.FindByTag( r ),
-		["scene.load"]             = r => SceneHandler.LoadScene( r ),
-
-		// Tag commands
-		["tag.add"]    = r => SceneHandler.TagAdd( r ),
-		["tag.remove"] = r => SceneHandler.TagRemove( r ),
-		["tag.list"]   = r => SceneHandler.TagList( r ),
-
-		// Component commands
-		["component.list"]   = r => ComponentHandler.ListComponents( r ),
-		["component.get"]    = r => ComponentHandler.GetComponent( r ),
-		["component.set"]    = r => ComponentHandler.SetComponent( r ),
-		["component.add"]    = r => ComponentHandler.AddComponent( r ),
-		["component.remove"] = r => ComponentHandler.RemoveComponent( r ),
-
-		// File commands
-		["file.read"]  = r => FileHandler.ReadFile( r ),
-		["file.write"] = r => FileHandler.WriteFile( r ),
-		["file.list"]  = r => FileHandler.ListFiles( r ),
-
-		// Project commands
-		["project.info"] = r => FileHandler.ProjectInfo( r ),
-
-		// Editor commands
-		["editor.get_selection"] = r => EditorHandler.HandleGetSelection( r ),
-		["editor.select"]        = r => EditorHandler.HandleSelectObject( r ),
-		["editor.undo"]          = r => EditorHandler.HandleUndo( r ),
-		["editor.redo"]          = r => EditorHandler.HandleRedo( r ),
-		["editor.save_scene"]    = r => EditorHandler.HandleSaveScene( r ),
-		["editor.screenshot"]    = r => EditorHandler.HandleScreenshot( r ),
-		["editor.play"]          = r => EditorHandler.HandlePlay( r ),
-		["editor.stop"]          = r => EditorHandler.HandleStop( r ),
-		["editor.is_playing"]    = r => EditorHandler.HandleIsPlaying( r ),
-		["editor.scene_info"]    = r => EditorHandler.HandleSceneInfo( r ),
-
-		// Diagnostics commands — backed by DiagnosticsBridge (compile.complete +
-		// EditorUtility.AddLogger subscriptions inside the editor).
-		// editor.console_output is an alias for diagnostics.get_logs so the existing
-		// MCP server tool name stays valid; both routes hit the same ring buffer.
-		["editor.console_output"]   = r => DiagnosticsHandler.HandleGetLogs( r ),
-		["diagnostics.get_logs"]    = r => DiagnosticsHandler.HandleGetLogs( r ),
-		["diagnostics.get_compile"] = r => DiagnosticsHandler.HandleGetCompile( r ),
-
-		// Asset commands
-		["asset.search"]       = r => AssetHandler.SearchAssets( r ),
-		["asset.fetch"]        = r => AssetHandler.FetchAsset( r ),
-		["asset.mount"]        = r => AssetHandler.MountAsset( r ),
-		["asset.browse_local"] = r => AssetHandler.BrowseLocalAssets( r ),
-
-		// Execution commands
-		["execute.csharp"] = r => ExecutionHandler.ExecuteCSharp( r ),
-		["console.run"]    = r => ExecutionHandler.RunConsoleCommand( r ),
-	};
-
 	[ConVar( "sbox_mcp_main_thread_timeout_ms" )]
 	public static int MainThreadTimeoutMs { get; set; } = 15_000;
 
@@ -88,25 +19,98 @@ public static class CommandRouter
 	public static string CurrentCommand { get; private set; }
 
 	/// <summary>
+	/// Dispatches a request to its handler via a switch expression.
+	/// Using a switch expression (instead of a static Dictionary of delegates) means
+	/// no static state holding delegate references, so editor hotload cannot break
+	/// dispatch by failing to cast old-assembly delegate types to new-assembly types.
+	/// Returns null for unknown commands.
+	/// </summary>
+	private static Task<object> Dispatch( BridgeRequest request )
+	{
+		return request.Command switch
+		{
+			// Scene commands
+			"scene.list"              => SceneHandler.ListObjects( request ),
+			"scene.get"               => SceneHandler.GetObject( request ),
+			"scene.create"            => SceneHandler.CreateObject( request ),
+			"scene.delete"            => SceneHandler.DeleteObject( request ),
+			"scene.find"              => SceneHandler.FindObjects( request ),
+			"scene.set_transform"     => SceneHandler.SetTransform( request ),
+			"scene.hierarchy"         => SceneHandler.GetHierarchy( request ),
+			"scene.clone"             => SceneHandler.CloneObject( request ),
+			"scene.reparent"          => SceneHandler.ReparentObject( request ),
+			"scene.find_by_component" => SceneHandler.FindByComponent( request ),
+			"scene.find_by_tag"       => SceneHandler.FindByTag( request ),
+			"scene.load"              => SceneHandler.LoadScene( request ),
+
+			// Tag commands
+			"tag.add"    => SceneHandler.TagAdd( request ),
+			"tag.remove" => SceneHandler.TagRemove( request ),
+			"tag.list"   => SceneHandler.TagList( request ),
+
+			// Component commands
+			"component.list"   => ComponentHandler.ListComponents( request ),
+			"component.get"    => ComponentHandler.GetComponent( request ),
+			"component.set"    => ComponentHandler.SetComponent( request ),
+			"component.add"    => ComponentHandler.AddComponent( request ),
+			"component.remove" => ComponentHandler.RemoveComponent( request ),
+
+			// File commands
+			"file.read"  => FileHandler.ReadFile( request ),
+			"file.write" => FileHandler.WriteFile( request ),
+			"file.list"  => FileHandler.ListFiles( request ),
+
+			// Project commands
+			"project.info" => FileHandler.ProjectInfo( request ),
+
+			// Editor commands
+			"editor.get_selection" => EditorHandler.HandleGetSelection( request ),
+			"editor.select"        => EditorHandler.HandleSelectObject( request ),
+			"editor.undo"          => EditorHandler.HandleUndo( request ),
+			"editor.redo"          => EditorHandler.HandleRedo( request ),
+			"editor.save_scene"    => EditorHandler.HandleSaveScene( request ),
+			"editor.screenshot"    => EditorHandler.HandleScreenshot( request ),
+			"editor.play"          => EditorHandler.HandlePlay( request ),
+			"editor.stop"          => EditorHandler.HandleStop( request ),
+			"editor.is_playing"    => EditorHandler.HandleIsPlaying( request ),
+			"editor.scene_info"    => EditorHandler.HandleSceneInfo( request ),
+
+			// Diagnostics commands — backed by DiagnosticsBridge (compile.complete +
+			// EditorUtility.AddLogger subscriptions inside the editor).
+			// editor.console_output is an alias for diagnostics.get_logs so the existing
+			// MCP server tool name stays valid; both routes hit the same ring buffer.
+			"editor.console_output"   => DiagnosticsHandler.HandleGetLogs( request ),
+			"diagnostics.get_logs"    => DiagnosticsHandler.HandleGetLogs( request ),
+			"diagnostics.get_compile" => DiagnosticsHandler.HandleGetCompile( request ),
+
+			// Asset commands
+			"asset.search"       => AssetHandler.SearchAssets( request ),
+			"asset.fetch"        => AssetHandler.FetchAsset( request ),
+			"asset.mount"        => AssetHandler.MountAsset( request ),
+			"asset.browse_local" => AssetHandler.BrowseLocalAssets( request ),
+
+			// Execution commands
+			"execute.csharp" => ExecutionHandler.ExecuteCSharp( request ),
+			"console.run"    => ExecutionHandler.RunConsoleCommand( request ),
+
+			_ => null
+		};
+	}
+
+	/// <summary>
 	/// Routes a request to its handler. Returns an error response for unknown commands.
 	/// Handlers are called directly — the editor main thread dispatches incoming messages.
 	/// </summary>
 	public static async Task<BridgeResponse> Route( BridgeRequest request )
 	{
-		if ( !Handlers.TryGetValue( request.Command, out var handler ) )
-		{
-			Log.Warning( $"[MCP Bridge] Unknown command: {request.Command}" );
-			return BridgeResponse.Fail( request.Id, $"Unknown command: {request.Command}" );
-		}
+		// Show toast and log immediately (before main-thread dispatch, so unknown commands also log)
+		McpCommandToast.Show( request.Command );
+		McpBridgeDock.Current?.AddLog( $"→ {request.Command}" );
+		CurrentCommand = request.Command;
 
 		try
 		{
 			object data = null;
-
-			// Show toast and log
-			McpCommandToast.Show( request.Command );
-			CurrentCommand = request.Command;
-			McpBridgeDock.Current?.AddLog( $"→ {request.Command}" );
 
 			// Dispatch to main thread — s&box editor APIs must run on the main thread.
 			var tcs = new System.Threading.Tasks.TaskCompletionSource<object>();
@@ -114,7 +118,13 @@ public static class CommandRouter
 			{
 				try
 				{
-					var result = await handler( request );
+					var handlerTask = Dispatch( request );
+					if ( handlerTask is null )
+					{
+						tcs.SetException( new InvalidOperationException( $"Unknown command: {request.Command}" ) );
+						return;
+					}
+					var result = await handlerTask;
 					tcs.SetResult( result );
 				}
 				catch ( Exception ex )
