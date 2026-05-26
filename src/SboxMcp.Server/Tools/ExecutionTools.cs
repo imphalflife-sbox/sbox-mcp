@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Text.Json;
 using ModelContextProtocol.Server;
 using SboxMcp.Server.Bridge;
 
@@ -34,11 +35,38 @@ public static class ExecutionTools
     }
 
     [McpServerTool(Name = "get_bridge_status")]
-    [Description("Check if the s&box editor bridge is connected")]
-    public static Task<string> GetBridgeStatus(EditorBridgeServer bridge, CancellationToken ct)
+    [Description("Check if the s&box editor bridge is connected, and how responsive it is.")]
+    public static async Task<string> GetBridgeStatus(EditorBridgeServer bridge, CancellationToken ct)
     {
-        var status = bridge.IsConnected ? "connected" : "disconnected";
-        var result = $"Bridge status: {status}\nBridge URL: ws://localhost:{bridge.Port}/";
-        return Task.FromResult(result);
+        if (!bridge.IsConnected)
+        {
+            return $"Bridge status: not connected\nBridge URL: ws://localhost:{bridge.Port}/";
+        }
+
+        // Probe responsiveness via bridge.health — this bypasses MainThread.Queue on
+        // the bridge side so it answers even when the editor's main thread is wedged.
+        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        probeCts.CancelAfter(TimeSpan.FromSeconds(2));
+
+        try
+        {
+            var response = await bridge.SendCommandAsync("bridge.health", null, probeCts.Token);
+            if (!response.Success)
+            {
+                return $"Bridge status: connected but unhealthy\nBridge URL: ws://localhost:{bridge.Port}/\nError: {response.Error}";
+            }
+
+            // Pretty-print the health data so a human reader can scan it.
+            var json = response.Data is JsonElement el ? el.GetRawText() : "{}";
+            return $"Bridge status: connected and responsive\nBridge URL: ws://localhost:{bridge.Port}/\nHealth: {json}";
+        }
+        catch (OperationCanceledException) when (probeCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            return $"Bridge status: connected but unresponsive (health probe timed out after 2s)\nBridge URL: ws://localhost:{bridge.Port}/";
+        }
+        catch (TimeoutException)
+        {
+            return $"Bridge status: connected but unresponsive (health probe timed out after 2s)\nBridge URL: ws://localhost:{bridge.Port}/";
+        }
     }
 }
