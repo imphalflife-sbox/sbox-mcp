@@ -78,6 +78,9 @@ public static class CommandRouter
 		["console.run"]    = r => ExecutionHandler.RunConsoleCommand( r ),
 	};
 
+	[ConVar( "sbox_mcp_main_thread_timeout_ms" )]
+	public static int MainThreadTimeoutMs { get; set; } = 15_000;
+
 	/// <summary>
 	/// Routes a request to its handler. Returns an error response for unknown commands.
 	/// Handlers are called directly — the editor main thread dispatches incoming messages.
@@ -113,7 +116,18 @@ public static class CommandRouter
 				}
 			} );
 
-			data = await tcs.Task;
+			try
+			{
+				data = await tcs.Task.WaitAsync( TimeSpan.FromMilliseconds( MainThreadTimeoutMs ) );
+			}
+			catch ( TimeoutException )
+			{
+				McpCommandToast.Complete( request.Command, false );
+				McpBridgeDock.Current?.AddLog( $"⏱ {request.Command}: main thread did not dispatch within {MainThreadTimeoutMs}ms" );
+				return BridgeResponse.Fail( request.Id,
+					$"Main thread did not dispatch '{request.Command}' within {MainThreadTimeoutMs}ms. " +
+					$"The editor is likely processing a hotload cascade — wait a few seconds and retry." );
+			}
 
 			// Update toast and dock on success
 			McpCommandToast.Complete( request.Command, true );
