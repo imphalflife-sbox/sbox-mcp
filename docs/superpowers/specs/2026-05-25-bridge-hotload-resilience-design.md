@@ -3,13 +3,13 @@
 **Date:** 2026-05-25
 **Author:** Claude (CC session, sbox-mcp repo)
 **Spawned by:** `tower_defense/docs/Investigations/2026-05-25-hotload-instability-report.md`
-**Status:** Draft — pending user review
+**Status:** Implemented; see Addendum for a post-soak correction.
 
 ## Background
 
-The s&box editor hot-reloads code-side changes by swapping assemblies in place. Some failure modes — engine-side panel-tree corruption, Razor closure substitution failures, engine InteropSystem-tracked HttpListener internals — are not ours to fix. But the sbox-mcp bridge stops responding after most hotload cycles, and that *is* fixable.
+The s&box editor hot-reloads code-side changes by swapping assemblies in place. Some failure modes — engine-side panel-tree corruption, Razor closure substitution failures — are not ours to fix. But the sbox-mcp bridge stops responding after most hotload cycles, and that *is* fixable.
 
-The investigation report's H2 attributes the bridge's death to an HttpListener substitution failure. That misreads the stack — `Sandbox.InteropSystem.Address` is an engine-internal dictionary tracking native-managed object handles, and the `_server._clients[]._ws._innerStream._context.Request._memoryBlob._result._asyncCallback` chain belongs to an engine HttpListener, not the bridge. The bridge uses `ClientWebSocket` (`McpBridgeClient.cs:60`) and has no HttpListener of its own.
+The investigation report's H2 attributes the bridge's death to an HttpListener substitution failure. The `_server._clients[]._ws._innerStream._context.Request._memoryBlob._result._asyncCallback` chain it cites belongs to the **bridge's own** `McpBridgeServer._clients[]` — post-transport-inversion (`dd7ef4f`) the bridge is the WebSocket *server* and owns an `HttpListener`. The original draft of this doc claimed the chain was engine-internal because earlier code used `ClientWebSocket`; that claim was wrong. See the Addendum for the remediation.
 
 The bridge actually dies for three different reasons:
 
@@ -30,7 +30,7 @@ The bridge currently has no hotload subscription, no main-thread watchdog, and n
 
 ## Non-goals
 
-- Filing or fixing engine bugs (ConsoleOverlay, Razor closure substitution, engine HttpListener). Out of scope.
+- Filing or fixing engine bugs (ConsoleOverlay, Razor closure substitution). Out of scope.
 - Project-side Razor lambda refactor — handled separately in tower_defense (see Companion Work).
 - Fork sync / FUNDING.yml cherry-pick — separate task #8.
 - Changing the inverted-transport architecture (`dd7ef4f`) or log-capture rewrite (`57c1178`). The fix builds on top.
@@ -174,3 +174,20 @@ Pass criteria: zero editor restarts required across a 30-minute session of norma
 - Does `MainThread` expose a queue-depth API? If not, `bridge.health.pendingMainThreadQueueDepth` is omitted. Confirm during implementation.
 - Should `bridge.health` be exposed as its own MCP tool (`get_bridge_health`), or only folded into `get_bridge_status`? Default to folded; promote later if useful.
 - Should the watchdog timeout be a convar (editable at runtime) rather than a const? Probably yes for the upstream PR. Use `[ConVar(...)] int sbox_mcp_main_thread_timeout_ms { get; set; } = 15_000;`.
+
+## Addendum — SkipHotload remediation (2026-05-25, post-soak)
+
+End-to-end soak after the initial five commits revealed that the `Unable to find matching substitution for static method` errors *did* originate from the bridge after all — specifically, from the upgrader walking `McpBridgeServer._clients[]._ws._innerStream._context.Request._memoryBlob._result._asyncCallback` and failing to migrate the BCL-internal `TaskFactory<HttpListenerContext>.<>c__DisplayClass35_0.<FromAsyncImpl>b__0` closure across the assembly substitution. The `[Event("hotloaded")]` handler fires *after* the upgrader runs, so it can't prevent the on-screen error spam.
+
+Fix (`McpBridgeServer.cs`):
+
+- Annotate `_clients` with `[SkipHotload]` so the upgrader stops descending into the per-client WebSocket task graph.
+- Drop `readonly` from the field (Start() must reinitialize it post-migration).
+- `Start()` performs `_clients ??= new List<ClientConnection>();` — SkipHotload nulls the field on the migrated instance, so re-init is required.
+- `Stop()` null-guards `_clients?.ToArray()` / `_clients?.Clear()` for the same reason.
+
+`_listener` and `_cts` are *not* SkipHotload'd — they must migrate so `Stop()` can release the port before `Start()` rebinds. A briefly-tested wider variant that SkipHotload'd all three orphaned the listener on port 29015 across hotload (the field went null but the underlying `HttpListener` lived on, blocking rebind until editor restart).
+
+**Trade-off:** active `ClientConnection` instances are unreachable after hotload (field is null); their sockets die on the next OS-level read, and the MCP server reconnects via its 3-second retry loop. Equivalent in practice to the existing post-hotload disconnect/reconnect behavior.
+
+Verified across two consecutive hotloads (asm v0.0.103 → v0.0.113 → v0.0.121): no `[hotload/GameMenu]` chain errors, no port-bind conflict, single LISTENING entry on 29015.
