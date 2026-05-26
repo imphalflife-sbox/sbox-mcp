@@ -93,6 +93,10 @@ public static class CommandRouter
 			"execute.csharp" => ExecutionHandler.ExecuteCSharp( request ),
 			"console.run"    => ExecutionHandler.RunConsoleCommand( request ),
 
+			// Bridge meta-commands — see BridgeHandler. These also bypass MainThread.Queue
+			// at the top of Route() so they remain responsive when the main thread is wedged.
+			"bridge.health" => BridgeHandler.Health( request ),
+
 			_ => null
 		};
 	}
@@ -103,6 +107,28 @@ public static class CommandRouter
 	/// </summary>
 	public static async Task<BridgeResponse> Route( BridgeRequest request )
 	{
+		// Bridge meta-commands answer directly without queueing onto the main thread.
+		// This is what lets `bridge.health` respond when the main thread is wedged.
+		if ( request.Command.StartsWith( "bridge.", StringComparison.Ordinal ) )
+		{
+			try
+			{
+				var bridgeTask = Dispatch( request );
+				if ( bridgeTask is null )
+				{
+					Log.Warning( $"[MCP Bridge] Unknown bridge meta-command: {request.Command}" );
+					return BridgeResponse.Fail( request.Id, $"Unknown command: {request.Command}" );
+				}
+				var data = await bridgeTask;
+				return BridgeResponse.Ok( request.Id, data );
+			}
+			catch ( Exception ex )
+			{
+				Log.Error( $"[MCP Bridge] Bridge meta-handler error for '{request.Command}': {ex.Message}" );
+				return BridgeResponse.Fail( request.Id, ex.Message );
+			}
+		}
+
 		// Show toast and log immediately (before main-thread dispatch, so unknown commands also log)
 		McpCommandToast.Show( request.Command );
 		McpBridgeDock.Current?.AddLog( $"→ {request.Command}" );
