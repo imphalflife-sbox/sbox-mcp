@@ -23,7 +23,12 @@ public class McpBridgeServer : IDisposable
 	private readonly int _port;
 	private HttpListener _listener;
 	private CancellationTokenSource _cts;
-	private readonly List<ClientConnection> _clients = new();
+	// SkipHotload here cuts the upgrader's walk before it reaches the BCL-internal
+	// TaskFactory closures via ClientConnection._ws._innerStream._context. Field is left
+	// null on the migrated instance; Start() re-initializes, and old clients are orphaned
+	// (their sockets die on next OS-level read). _listener/_cts migrate normally so Stop()
+	// can release the port before Start() rebinds.
+	[SkipHotload] private List<ClientConnection> _clients = new();
 	private readonly object _clientsLock = new();
 	private bool _disposed;
 
@@ -48,6 +53,9 @@ public class McpBridgeServer : IDisposable
 	{
 		if ( _cts is not null )
 			return;
+
+		// SkipHotload leaves these null on a migrated instance — re-initialize defensively.
+		_clients ??= new List<ClientConnection>();
 
 		_cts = new CancellationTokenSource();
 		_listener = new HttpListener();
@@ -84,8 +92,9 @@ public class McpBridgeServer : IDisposable
 		ClientConnection[] toClose;
 		lock ( _clientsLock )
 		{
-			toClose = _clients.ToArray();
-			_clients.Clear();
+			// _clients can be null after a hotload (SkipHotload leaves it at default).
+			toClose = _clients?.ToArray() ?? Array.Empty<ClientConnection>();
+			_clients?.Clear();
 		}
 		foreach ( var c in toClose )
 			c.Dispose();
