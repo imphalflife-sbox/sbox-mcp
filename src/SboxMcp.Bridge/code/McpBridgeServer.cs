@@ -280,8 +280,14 @@ internal sealed class ClientConnection : IDisposable
 		if ( _disposed ) return;
 		_disposed = true;
 
-		try { _ws.CloseAsync( WebSocketCloseStatus.NormalClosure, "Disposed", CancellationToken.None ).GetAwaiter().GetResult(); }
-		catch { /* best-effort close */ }
+		// Abort, not CloseAsync().GetResult(). Dispose runs on the editor main thread
+		// during [Event("hotloaded")]; CloseAsync.TakeLocks blocks on the receive
+		// semaphore held by ReceiveLoop, which can only release after a clean close
+		// handshake — which can't complete because we've blocked the only thread that
+		// could pump it. Abort skips the handshake; the client sees a reset and
+		// reconnects via its retry loop.
+		try { _ws.Abort(); }
+		catch { /* best-effort */ }
 
 		_ws.Dispose();
 		_sendLock.Dispose();

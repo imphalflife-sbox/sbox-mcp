@@ -191,3 +191,29 @@ Fix (`McpBridgeServer.cs`):
 **Trade-off:** active `ClientConnection` instances are unreachable after hotload (field is null); their sockets die on the next OS-level read, and the MCP server reconnects via its 3-second retry loop. Equivalent in practice to the existing post-hotload disconnect/reconnect behavior.
 
 Verified across two consecutive hotloads (asm v0.0.103 → v0.0.113 → v0.0.121): no `[hotload/GameMenu]` chain errors, no port-bind conflict, single LISTENING entry on 29015.
+
+## Addendum 2 — Sync-over-async deadlock in ClientConnection.Dispose (2026-05-27)
+
+Further usage surfaced a hard editor freeze on hotload when an MCP client was connected. Captured a full-process dump (`dotnet-dump`) of a wedged `sbox-dev.exe`; the editor main thread was blocked in this stack:
+
+```
+WebSocketBase.TakeLocks
+WebSocketBase.CloseOutputAsyncCore
+WebSocketBase.CloseAsyncCore
+SboxMcp.Bridge.ClientConnection.Dispose()       [McpBridgeServer.cs:283]
+SboxMcp.Bridge.McpBridgeServer.Stop()           [McpBridgeServer.cs:100]
+SboxMcp.Bridge.McpBridgeDock.StopServer()       [McpEditorTool.cs:339]
+SboxMcp.Bridge.McpBridgeDock.OnHotloaded()      [McpEditorTool.cs:267]
+Sandbox.PackageLoader.OnHotloadSuccess()
+Sandbox.PackageLoader.TryFastHotload
+```
+
+**What happened:** `[Event("hotloaded")]` runs on the editor main thread. `OnHotloaded` calls `StopServer()` which iterates `_clients` and synchronously waits on `_ws.CloseAsync(...).GetAwaiter().GetResult()`. `CloseAsync` calls `WebSocketBase.TakeLocks()` to acquire the WebSocket's send and receive semaphores. **The receive semaphore is held by the still-running `ReceiveLoop`** (also visible in the dump in `ReceiveAsyncCore`); it only releases after the close handshake completes — which can't complete because the main thread is blocked in `GetResult()` and can't pump anything. Classic sync-over-async deadlock.
+
+**Correction to Addendum 1:** The `[SkipHotload]` annotation on `_clients` does *not* prevent this — the dump shows `_clients` had at least one live `ClientConnection` when `OnHotloaded` fired. Either `[SkipHotload]` doesn't apply to instance fields the way Addendum 1 claimed, or `OnHotloaded` runs on the pre-migration instance. Either way, Addendum 1's "null-on-migrated-instance" mitigation was not the load-bearing fix; it just happened to silence the upgrader chain errors by hiding `_clients` from the field walker.
+
+**Real fix:** Replace `CloseAsync(...).GetAwaiter().GetResult()` with `_ws.Abort()` in `ClientConnection.Dispose`. `Abort` is synchronous, doesn't acquire WebSocket locks, and forcefully terminates the connection. The MCP server's client sees a connection-reset and reconnects via its 3-second retry loop — the same recovery path Addendum 1's design assumed.
+
+**General constraint surfaced:** `[Event]` handlers in s&box editor addons run on the editor main thread. Any sync-wait on async I/O (`.GetAwaiter().GetResult()`, `.Result`, `.Wait()`) from inside one is a deadlock waiting to happen if the awaited operation needs the main thread to make progress. Prefer abort-style cleanup or schedule async work and let it complete asynchronously.
+
+**Verified:** hotload triggered with two MCP clients connected; full `Stopped → Listening → Server started → Client disconnected → Client reconnected` sequence completed in ~10 ms; editor stayed responsive; both MCP clients reconnected within 3 s.
